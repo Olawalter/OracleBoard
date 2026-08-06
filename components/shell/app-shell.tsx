@@ -1,12 +1,11 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
 import { CircuitBoard, FileSignature, Gavel, Radar } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn, shortAddress } from "@/lib/utils";
-import { getAccount } from "@/lib/genlayer/client";
+import { cn } from "@/lib/utils";
 import { CLIENT_CHAIN } from "@/lib/genlayer/config";
+import { WalletIdentityBar } from "@/components/shell/wallet-identity-bar";
 
 const NAV = [
   { href: "/submissions", label: "Submissions", icon: FileSignature },
@@ -16,16 +15,6 @@ const NAV = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const [address, setAddress] = useState<string | null>(null);
-
-  useEffect(() => {
-    try {
-      const acc = getAccount();
-      setAddress((acc as unknown as { address?: string }).address ?? null);
-    } catch {
-      setAddress(null);
-    }
-  }, []);
 
   return (
     <div className="relative min-h-screen">
@@ -70,13 +59,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             })}
           </nav>
           <div className="flex items-center gap-3">
-            <div className="hidden items-center gap-2 rounded-md border border-border bg-card/60 px-3 py-1.5 text-xs sm:flex">
-              <span className="h-1.5 w-1.5 animate-pulse-ring rounded-full bg-emerald-400" />
-              <span className="uppercase tracking-[0.18em] text-muted-foreground">
-                {CLIENT_CHAIN}
-              </span>
-              <span className="font-mono text-foreground">{shortAddress(address, 5, 4) || "—"}</span>
-            </div>
+            <WalletIdentityBar />
             <Button asChild size="sm" variant="accent">
               <Link href="/submissions/new">Submit dossier</Link>
             </Button>
@@ -100,7 +83,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <div className="flex items-center gap-4">
             <span>Chain · {CLIENT_CHAIN}</span>
-            <span className="font-mono">{shortAddress(address, 6, 6) || "no wallet"}</span>
           </div>
         </div>
       </footer>
