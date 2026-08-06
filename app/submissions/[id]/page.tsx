@@ -73,7 +73,7 @@ export default function SubmissionPage() {
           if (!isUndetermined || attempt === MAX_ATTEMPTS) throw lastErr;
           push({
             title: `Validators disagreed — retrying (${attempt}/${MAX_ATTEMPTS})`,
-            tone: "warning",
+            tone: "default",
           });
         }
       }
