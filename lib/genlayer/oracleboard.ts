@@ -96,7 +96,7 @@ async function pollUntilDecided(
   interval = 3000,
 ) {
   for (let i = 0; i < retries; i++) {
-    const tx = await client.getTransaction({ hash: hash as `0x${string}` });
+    const tx = await client.getTransaction({ hash: hash as never });
     const name = tx.statusName;
     const num = tx.status;
     const status =
