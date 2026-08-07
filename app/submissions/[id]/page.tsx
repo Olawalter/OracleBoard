@@ -91,18 +91,28 @@ export default function SubmissionPage() {
   async function submitAppeal() {
     if (!id) return;
     setAppealBusy(true);
+    const MAX_ATTEMPTS = 2;
     try {
-      await oracleBoard.appeal({
-        submissionId: id,
-        rebuttal: appealRebuttal,
-      });
-      push({ title: "Appeal filed — bond posted", tone: "success" });
-      setAppealOpen(false);
-      setAppealRebuttal("");
-      await refresh();
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          await oracleBoard.appeal({ submissionId: id, rebuttal: appealRebuttal });
+          push({ title: "Appeal filed — bond posted", tone: "success" });
+          setAppealOpen(false);
+          setAppealRebuttal("");
+          await refresh();
+          return;
+        } catch (err) {
+          const msg = (err as Error).message ?? "";
+          const isUndetermined =
+            msg.toLowerCase().includes("undetermined") ||
+            msg.toLowerCase().includes("consensus");
+          if (!isUndetermined || attempt === MAX_ATTEMPTS) throw err;
+          push({ title: `Validators disagreed — retrying appeal (${attempt}/${MAX_ATTEMPTS})`, tone: "default" });
+        }
+      }
     } catch (err) {
       push({
-        title: "Appeal rejected",
+        title: "Appeal failed",
         tone: "error",
         description: (err as Error).message,
       });
@@ -114,10 +124,28 @@ export default function SubmissionPage() {
   async function runAdjudicate() {
     if (!id) return;
     setAdjudicating(true);
+    const MAX_ATTEMPTS = 3;
     try {
-      await oracleBoard.adjudicate(id);
-      push({ title: "Appeal adjudicated — verdict updated", tone: "success" });
-      await refresh();
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          await oracleBoard.adjudicate(id);
+          push({
+            title: attempt > 1
+              ? `Appeal adjudicated (attempt ${attempt})`
+              : "Appeal adjudicated — verdict updated",
+            tone: "success",
+          });
+          await refresh();
+          return;
+        } catch (err) {
+          const msg = (err as Error).message ?? "";
+          const isUndetermined =
+            msg.toLowerCase().includes("undetermined") ||
+            msg.toLowerCase().includes("consensus");
+          if (!isUndetermined || attempt === MAX_ATTEMPTS) throw err;
+          push({ title: `Validators disagreed — retrying (${attempt}/${MAX_ATTEMPTS})`, tone: "default" });
+        }
+      }
     } catch (err) {
       push({
         title: "Adjudication failed",
@@ -224,16 +252,17 @@ export default function SubmissionPage() {
               {adjudicating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gavel className="h-4 w-4" />}
               Adjudicate appeal
             </Button>
-          ) : (
+          ) : challenge && !challenge.resolved ? (
             <Button variant="accent" onClick={runEvaluate} disabled={evaluating}>
               {evaluating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />}
-              {verdict && !(challenge && !challenge.resolved)
-                ? "Rerun validators"
-                : challenge && !challenge.resolved
-                  ? "Reevaluate under challenge"
-                  : "Run validators"}
+              Reevaluate under challenge
             </Button>
-          )}
+          ) : !verdict ? (
+            <Button variant="accent" onClick={runEvaluate} disabled={evaluating}>
+              {evaluating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />}
+              Run validators
+            </Button>
+          ) : null}
           {verdict && !appeal && !isAppealed ? (
             <Dialog open={appealOpen} onOpenChange={setAppealOpen}>
               <DialogTrigger asChild>
@@ -493,6 +522,26 @@ export default function SubmissionPage() {
                     )}
                   </div>
                 </div>
+              </CardContent>
+            </Card>
+          ) : isAppealed ? (
+            // StudioNet TreeMap reads can fail after a write — show a
+            // placeholder so the panel isn't silently blank.
+            <Card>
+              <CardHeader>
+                <CardTitle>Appeal</CardTitle>
+                <CardDescription>Filed — details loading from chain</CardDescription>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">
+                <div className="flex items-center justify-between">
+                  <span>Bond: 0.001 GEN (symbolic on StudioNet)</span>
+                  <Badge variant="warning">pending adjudication</Badge>
+                </div>
+                <p className="mt-3 text-xs">
+                  The appeal was accepted on-chain. Click{" "}
+                  <strong>Adjudicate appeal</strong> above to run the secondary
+                  validator panel.
+                </p>
               </CardContent>
             </Card>
           ) : null}
