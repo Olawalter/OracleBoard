@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Cpu, Flag, Gavel, Loader2, RefreshCcw, Scale, ShieldQuestion } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -41,6 +41,25 @@ export default function SubmissionPage() {
   const [appealBusy, setAppealBusy] = useState(false);
   const [appealOpen, setAppealOpen] = useState(false);
   const [adjudicating, setAdjudicating] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const busy = evaluating || adjudicating;
+  useEffect(() => {
+    if (busy) {
+      setElapsed(0);
+      elapsedRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
+    } else {
+      if (elapsedRef.current) clearInterval(elapsedRef.current);
+      setElapsed(0);
+    }
+    return () => { if (elapsedRef.current) clearInterval(elapsedRef.current); };
+  }, [busy]);
+
+  function fmtElapsed(s: number) {
+    if (s < 60) return `${s}s`;
+    return `${Math.floor(s / 60)}m ${s % 60}s`;
+  }
 
   async function runEvaluate() {
     if (!id) return;
@@ -248,20 +267,35 @@ export default function SubmissionPage() {
             <RefreshCcw className="h-4 w-4" /> Refresh
           </Button>
           {isAppealed ? (
-            <Button variant="accent" onClick={runAdjudicate} disabled={adjudicating}>
-              {adjudicating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gavel className="h-4 w-4" />}
-              Adjudicate appeal
-            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <Button variant="accent" onClick={runAdjudicate} disabled={adjudicating}>
+                {adjudicating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gavel className="h-4 w-4" />}
+                {adjudicating ? `Adjudicating… ${fmtElapsed(elapsed)}` : "Adjudicate appeal"}
+              </Button>
+              {adjudicating && (
+                <span className="text-[11px] text-muted-foreground">Validators typically take 3–12 min</span>
+              )}
+            </div>
           ) : challenge && !challenge.resolved ? (
-            <Button variant="accent" onClick={runEvaluate} disabled={evaluating}>
-              {evaluating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />}
-              Reevaluate under challenge
-            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <Button variant="accent" onClick={runEvaluate} disabled={evaluating}>
+                {evaluating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />}
+                {evaluating ? `Reevaluating… ${fmtElapsed(elapsed)}` : "Reevaluate under challenge"}
+              </Button>
+              {evaluating && (
+                <span className="text-[11px] text-muted-foreground">Validators typically take 3–12 min</span>
+              )}
+            </div>
           ) : !verdict ? (
-            <Button variant="accent" onClick={runEvaluate} disabled={evaluating}>
-              {evaluating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />}
-              Run validators
-            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <Button variant="accent" onClick={runEvaluate} disabled={evaluating}>
+                {evaluating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />}
+                {evaluating ? `Running validators… ${fmtElapsed(elapsed)}` : "Run validators"}
+              </Button>
+              {evaluating && (
+                <span className="text-[11px] text-muted-foreground">Validators typically take 3–12 min</span>
+              )}
+            </div>
           ) : null}
           {verdict && !appeal && !isAppealed ? (
             <Dialog open={appealOpen} onOpenChange={setAppealOpen}>
@@ -482,6 +516,21 @@ export default function SubmissionPage() {
                     {challenge.resolved ? "resolved" : "open"}
                   </Badge>
                 </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {isAppealed && !appeal ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Appeal</CardTitle>
+                <CardDescription>Filed — awaiting on-chain read</CardDescription>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">
+                <p>The appeal was written on-chain but the details are not yet
+                readable from this node (a known StudioNet TreeMap read lag).
+                Click <strong>Refresh</strong> in a few seconds — or proceed
+                directly to <strong>Adjudicate appeal</strong> above.</p>
               </CardContent>
             </Card>
           ) : null}

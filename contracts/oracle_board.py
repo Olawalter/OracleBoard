@@ -24,6 +24,13 @@ from genlayer import *
 
 import json
 import typing
+from datetime import datetime, timezone
+
+
+def now() -> int:
+    """UTC Unix timestamp in seconds. GenLayer pins datetime.now() to the
+    transaction timestamp, so all validators receive the same value."""
+    return int(datetime.now(timezone.utc).timestamp())
 
 
 MAX_EVIDENCE_CHARS = 24_000
@@ -428,7 +435,7 @@ class OracleBoard(gl.Contract):
         s.evidence_digest = evidence  # stored verbatim; frontends hash / display as needed
         for u in clean_urls:
             s.urls.append(u)
-        s.created_at = u256(0)
+        s.created_at = u256(now())
         s.status = "pending"
 
         self.submissions[submission_id] = s
@@ -514,7 +521,7 @@ class OracleBoard(gl.Contract):
         for f in v_data.get("follow_up", []):
             v.follow_up.append(str(f))
         v.summary = v_data.get("summary", "")
-        v.finalized_at = u256(0)
+        v.finalized_at = u256(now())
 
         self.verdicts[submission_id] = v
         s.status = "resolved"
@@ -547,7 +554,7 @@ class OracleBoard(gl.Contract):
         c.kind = kind
         c.evidence_digest = evidence_digest
         c.reason = reason
-        c.created_at = u256(0)
+        c.created_at = u256(now())
         c.resolved = False
 
         self.challenges[submission_id] = c
@@ -638,7 +645,7 @@ class OracleBoard(gl.Contract):
         for f in v_data.get("follow_up", []):
             v.follow_up.append(str(f))
         v.summary = v_data.get("summary", "")
-        v.finalized_at = u256(0)
+        v.finalized_at = u256(now())
 
         self.verdicts[submission_id] = v
         c.resolved = True
@@ -679,7 +686,7 @@ class OracleBoard(gl.Contract):
         a.appellant = gl.message.sender_address
         a.bond_wei = u256(bond)
         a.rebuttal = rebuttal.strip()
-        a.created_at = u256(0)
+        a.created_at = u256(now())
         a.adjudicated = False
         a.overturned = False
         a.refunded = False
@@ -787,7 +794,7 @@ class OracleBoard(gl.Contract):
         for f in v_data.get("follow_up", []):
             v.follow_up.append(str(f))
         v.summary = v_data.get("summary", "")
-        v.finalized_at = u256(0)
+        v.finalized_at = u256(now())
 
         self.verdicts[submission_id] = v
         a.adjudicated = True
