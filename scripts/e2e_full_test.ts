@@ -17,8 +17,9 @@ import { studionet } from "genlayer-js/chains";
 
 loadEnv({ path: resolve(process.cwd(), ".env.local") });
 
-const CONTRACT = process.env.NEXT_PUBLIC_ORACLEBOARD_ADDRESS as `0x${string}`;
-const BOND     = BigInt("1000000000000000");
+const CONTRACT        = process.env.NEXT_PUBLIC_ORACLEBOARD_ADDRESS as `0x${string}`;
+const BOND            = BigInt("1000000000000000"); // 0.001 GEN — appeal bond
+const CHALLENGE_BOND  = BigInt("1000000000000000"); // 0.001 GEN — challenge bond
 const MAX_CONSENSUS_ATTEMPTS = 5;
 const WRITE_GAP_MS  = 15000;  // pause between write calls — StudioNet: 30 req/min
 const POLL_INTERVAL = 10000;  // poll every 10s (6 req/min per loop)
@@ -305,9 +306,19 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════
 
   if (chalVerdictBefore) {
-    // 4a. Challenge with insufficient evidence (guard)
-    note(`Testing: challenge with too-short evidence...`);
+    // 4a. Challenge without bond (guard)
+    note(`Testing: challenge without bond...`);
     await write(clientB, "challenge", [ID_CHAL, "new_evidence", "short", ""], BigInt(0));
+    const c_nobond = await safeRead<any>(clientA, "get_challenge", [ID_CHAL]);
+    if (!c_nobond) {
+      ok("GUARD: challenge without bond rejected — no challenge persisted");
+    } else {
+      fail("GUARD: challenge without bond rejected", "challenge was persisted");
+    }
+
+    // 4b. Challenge with bond but insufficient evidence (guard)
+    note(`Testing: challenge with bond but too-short evidence...`);
+    await write(clientB, "challenge", [ID_CHAL, "new_evidence", "short", ""], CHALLENGE_BOND);
     const c_short = await safeRead<any>(clientA, "get_challenge", [ID_CHAL]);
     if (!c_short) {
       ok("GUARD: short evidence challenge rejected — no challenge persisted");
@@ -315,7 +326,7 @@ async function main() {
       fail("GUARD: short evidence challenge rejected", "challenge was persisted");
     }
 
-    // 4b. Valid challenge (by stranger wallet — anyone can challenge)
+    // 4c. Valid challenge (by stranger wallet — anyone can challenge with bond)
     const newEvidence =
       "NEW EVIDENCE: Compound v3 governance proposal #167 introduced a parameter " +
       "that temporarily paused the USDC market on mainnet for 8 hours in Q1 2025. " +
@@ -323,11 +334,11 @@ async function main() {
       "proposal passed due to a quorum calculation bug in the Governor contract. " +
       "This introduces a governance integrity risk not captured in the initial verdict.";
 
-    note(`Opening challenge on ${ID_CHAL} (stranger wallet)...`);
+    note(`Opening challenge on ${ID_CHAL} (stranger wallet, bond=${CHALLENGE_BOND} wei)...`);
     const r_chal = await write(clientB, "challenge", [
       ID_CHAL, "new_evidence", newEvidence,
       "Initial verdict missed the governance quorum calculation bug — material risk omitted.",
-    ], BigInt(0));
+    ], CHALLENGE_BOND);
     if (r_chal.ok) {
       const c: any = await read(clientA, "get_challenge", [ID_CHAL]);
       ok("challenge opened by stranger wallet");
@@ -347,7 +358,7 @@ async function main() {
           ok("reevaluate resolved challenge");
           note(`before → after risk: ${chalVerdictBefore.overall_risk} → ${vAfter.overall_risk}`);
           note(`before → after confidence: ${chalVerdictBefore.confidence} → ${vAfter.confidence}`);
-          note(`challenge.resolved: ${cAfter.resolved}`);
+          note(`challenge.resolved: ${cAfter.resolved}  bond_refunded: ${cAfter.bond_refunded}`);
         } else {
           fail("reevaluate", "verdict or resolved flag not updated");
         }

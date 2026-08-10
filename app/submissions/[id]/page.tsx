@@ -362,7 +362,9 @@ export default function SubmissionPage() {
                   <DialogTitle>Challenge this verdict</DialogTitle>
                   <DialogDescription>
                     Challenges must contribute new material evidence or identify a
-                    factual error the validators missed.
+                    factual error the validators missed. A bond of{" "}
+                    <strong>0.001 GEN</strong> is required — refunded if the
+                    reevaluation changes the risk or confidence verdict.
                   </DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-4">
@@ -512,9 +514,15 @@ export default function SubmissionPage() {
                 <Separator />
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>Opened {formatTimestamp(challenge.created_at)}</span>
-                  <Badge variant={challenge.resolved ? "success" : "warning"}>
-                    {challenge.resolved ? "resolved" : "open"}
-                  </Badge>
+                  <div className="flex items-center gap-2">
+                    <span>{(challenge.bond_wei / 1e15).toFixed(3)} GEN bond</span>
+                    {challenge.bond_refunded ? (
+                      <Badge variant="success">bond refunded</Badge>
+                    ) : null}
+                    <Badge variant={challenge.resolved ? "success" : "warning"}>
+                      {challenge.resolved ? "resolved" : "open"}
+                    </Badge>
+                  </div>
                 </div>
               </CardContent>
             </Card>

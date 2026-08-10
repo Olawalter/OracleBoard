@@ -36,8 +36,10 @@ export type Challenge = {
   kind: "new_evidence" | "factual_error";
   evidence_digest: string;
   reason: string;
+  bond_wei: number;
   created_at: number;
   resolved: boolean;
+  bond_refunded: boolean;
 };
 
 export type Appeal = {
@@ -51,7 +53,8 @@ export type Appeal = {
   refunded: boolean;
 };
 
-export const APPEAL_BOND_WEI = BigInt("1000000000000000"); // 0.001 GEN
+export const APPEAL_BOND_WEI = BigInt("1000000000000000");    // 0.001 GEN
+export const CHALLENGE_BOND_WEI = BigInt("1000000000000000"); // 0.001 GEN — forfeited if reevaluation upholds
 
 type ContractArg =
   | string
@@ -163,8 +166,9 @@ export const oracleBoard = {
     kind: "new_evidence" | "factual_error";
     evidence: string;
     reason: string;
+    bondWei?: bigint;
   }) =>
-    write("challenge", [input.submissionId, input.kind, input.evidence, input.reason]),
+    write("challenge", [input.submissionId, input.kind, input.evidence, input.reason], input.bondWei ?? CHALLENGE_BOND_WEI),
 
   reevaluate: (submissionId: string) => write("reevaluate", [submissionId]),
 

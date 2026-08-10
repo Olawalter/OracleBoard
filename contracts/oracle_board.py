@@ -47,7 +47,8 @@ BLOCKED_HOSTS = (
     "::1",
 )
 
-APPEAL_BOND_WEI = 1_000_000_000_000_000  # 0.001 GEN — symbolic on StudioNet
+APPEAL_BOND_WEI = 1_000_000_000_000_000    # 0.001 GEN — symbolic on StudioNet
+CHALLENGE_BOND_WEI = 1_000_000_000_000_000  # 0.001 GEN — forfeited if reevaluation upholds verdict
 APPEAL_WINDOW_SECS = 259_200  # 72 hours (unused on StudioNet where block time ≈ 0)
 
 RISK_LEVELS = ("low", "moderate", "elevated", "high", "severe")
@@ -88,8 +89,10 @@ class Challenge:
     kind: str  # "new_evidence" | "factual_error"
     evidence_digest: str
     reason: str
+    bond_wei: u256
     created_at: u256
     resolved: bool
+    bond_refunded: bool
 
 
 @allow_storage
@@ -356,8 +359,10 @@ class OracleBoard(gl.Contract):
             "kind": c.kind,
             "evidence_digest": c.evidence_digest,
             "reason": c.reason,
+            "bond_wei": int(c.bond_wei),
             "created_at": int(c.created_at),
             "resolved": bool(c.resolved),
+            "bond_refunded": bool(c.bond_refunded),
         }
 
     @gl.public.view
@@ -548,14 +553,23 @@ class OracleBoard(gl.Contract):
         if len(reason) > 2_000:
             raise gl.vm.UserError("reason too long")
 
+        bond = int(gl.message.value)
+        if bond < CHALLENGE_BOND_WEI:
+            raise gl.vm.UserError(
+                f"challenge requires a bond of at least {CHALLENGE_BOND_WEI} wei "
+                f"(0.001 GEN). Sent: {bond}"
+            )
+
         c = Challenge()
         c.submission_id = submission_id
         c.challenger = gl.message.sender_address
         c.kind = kind
         c.evidence_digest = evidence_digest
         c.reason = reason
+        c.bond_wei = u256(bond)
         c.created_at = u256(now())
         c.resolved = False
+        c.bond_refunded = False
 
         self.challenges[submission_id] = c
 
@@ -647,8 +661,18 @@ class OracleBoard(gl.Contract):
         v.summary = v_data.get("summary", "")
         v.finalized_at = u256(now())
 
+        new_risk_score = _score_risk(str(v_data["overall_risk"]))
+        new_conf_score = _score_confidence(str(v_data["confidence"]))
+        old_v = self.verdicts[submission_id]
+        old_risk_score = _score_risk(old_v.overall_risk)
+        old_conf_score = _score_confidence(old_v.confidence)
+        verdict_changed = (new_risk_score != old_risk_score) or (new_conf_score != old_conf_score)
+
         self.verdicts[submission_id] = v
         c.resolved = True
+        if verdict_changed:
+            c.bond_refunded = True
+            # gl.message.send(c.challenger, c.bond_wei)  # not yet available on StudioNet
         s.status = "resolved"
 
     @gl.public.write
