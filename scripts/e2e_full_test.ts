@@ -358,7 +358,7 @@ async function main() {
           ok("reevaluate resolved challenge");
           note(`before → after risk: ${chalVerdictBefore.overall_risk} → ${vAfter.overall_risk}`);
           note(`before → after confidence: ${chalVerdictBefore.confidence} → ${vAfter.confidence}`);
-          note(`challenge.resolved: ${cAfter.resolved}  bond_refunded: ${cAfter.bond_refunded}`);
+          note(`challenge.resolved: ${cAfter.resolved}  refund_due: ${cAfter.refund_due}  forfeited: ${cAfter.forfeited}`);
         } else {
           fail("reevaluate", "verdict or resolved flag not updated");
         }
@@ -457,7 +457,7 @@ async function main() {
         note(`submission.status: ${subFinal.status}`);
         if (aFinal) {
           note(`appeal.adjudicated: ${aFinal.adjudicated}`);
-          note(`appeal.overturned: ${aFinal.overturned}  (bond refunded: ${aFinal.refunded})`);
+          note(`appeal.overturned: ${aFinal.overturned}  (refund_due: ${aFinal.refund_due}, forfeited: ${aFinal.forfeited})`);
         } else {
           note(`get_appeal read failed — known StudioNet TreeMap issue`);
         }

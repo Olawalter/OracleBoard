@@ -165,7 +165,7 @@ async function main() {
   console.log(`  Status:       ${finalSub.status}`);
   console.log(`  Adjudicated:  ${finalAppeal.adjudicated}`);
   console.log(`  Overturned:   ${finalAppeal.overturned}`);
-  console.log(`  Bond refunded:${finalAppeal.refunded}`);
+  console.log(`  Refund due:   ${finalAppeal.refund_due} (claim with claim_refund)`);
   console.log(`  ---`);
   console.log(`  Risk:         ${finalVerdict.overall_risk}`);
   console.log(`  Confidence:   ${finalVerdict.confidence}`);

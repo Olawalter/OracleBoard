@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "test:ui": "tsx scripts/test_refund_status.ts",
     "deploy:contract": "tsx scripts/deploy.ts"
   },
   "dependencies": {

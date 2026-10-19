@@ -14,10 +14,22 @@ risks), not over free-form prose or exact JSON strings.
 
 Only the accepted consensus verdict is persisted on-chain.
 
-Appeals: the original submitter may post a bond and submit custom rebuttal
-instructions to trigger a secondary adjudication round. If the adjudication
-changes the verdict (different risk or confidence bucket), the bond is
-refunded; otherwise it stays in the contract.
+Bonds: challenges and appeals are payable writes. The bond recorded is the
+value actually received (`gl.message.value`). When a dispute resolves in the
+bonder's favour (the verdict's risk or confidence bucket changed) the contract
+records a *claimable refund*; the depositor then calls `claim_refund`, which
+zeroes the entitlement and emits a native transfer of exactly that amount.
+Otherwise the bond is forfeited and stays in the contract.
+
+Refused payable calls: a transaction that raises keeps its attached GEN in the
+contract on StudioNet (measured by the sibling Inquest project). `challenge` and
+`appeal` therefore never raise once value may be attached: every check runs
+before any write, and a refusal returns {"ok": False, "reason": ...} while
+emitting a refund of the exact attached value on finalization.
+
+Disputes: a submission can have at most one unresolved dispute (challenge OR
+appeal) at a time. Every dispute is stored under its own `<submission>#<n>` key,
+so earlier records are never overwritten.
 """
 
 from genlayer import *
@@ -85,26 +97,62 @@ class Verdict:
 @allow_storage
 class Challenge:
     submission_id: str
-    challenger: Address
+    index: u32  # 1-based sequence number within the submission
+    challenger: Address  # the account that actually sent the bond
     kind: str  # "new_evidence" | "factual_error"
     evidence_digest: str
     reason: str
-    bond_wei: u256
+    bond_wei: u256  # value actually received with the challenge
     created_at: u256
     resolved: bool
-    bond_refunded: bool
+    refund_due: u256  # claimable now; zeroed by claim_refund
+    refund_claimed: u256  # amount for which a payout transfer has been emitted
+    forfeited: u256  # amount kept by the contract
 
 
 @allow_storage
 class Appeal:
     submission_id: str
-    appellant: Address
-    bond_wei: u256
+    index: u32
+    appellant: Address  # the account that actually sent the bond
+    bond_wei: u256  # value actually received with the appeal
     rebuttal: str
     created_at: u256
     adjudicated: bool
     overturned: bool
-    refunded: bool
+    refund_due: u256
+    refund_claimed: u256
+    forfeited: u256
+
+
+# Paying an ordinary account. `gl.get_contract_at(addr).emit_transfer` is a GenVM
+# contract message and fails ("contract not found") when the recipient is an
+# EOA on StudioNet. The SDK's EVM-style plain send credits any address and, like
+# every emitted message, lands only when the emitting transaction finalizes.
+# Pattern taken from the sibling Inquest contract (inquest.py `_pay`).
+try:
+    from genlayer.gl.evm import contract_interface as _evm_interface
+except ImportError:
+    from genlayer.gl._internal.eth import evm_contract_interface as _evm_interface
+
+
+@_evm_interface
+class _Recipient:
+    class View:
+        pass
+
+    class Write:
+        pass
+
+
+def _count(counts, submission_id: str) -> int:
+    """Number of disputes recorded for a submission in a counts map."""
+    return int(counts[submission_id]) if submission_id in counts else 0
+
+
+def _dispute_key(submission_id: str, index: int) -> str:
+    """Storage key of the n-th (1-based) challenge / appeal of a submission."""
+    return f"{submission_id}#{index}"
 
 
 def _sanitize_url(url: str) -> str:
@@ -307,9 +355,77 @@ class OracleBoard(gl.Contract):
     appeals: TreeMap[str, Appeal]
     submission_ids: DynArray[str]
     owner: Address
+    challenge_counts: TreeMap[str, u32]
+    appeal_counts: TreeMap[str, u32]
+    # Bond ledger. deposited_total == pending_bonds + refund_liability
+    #                                 + refunded_total + forfeited_total
+    deposited_total: u256
+    pending_bonds: u256  # held for disputes not yet resolved
+    refund_liability: u256  # resolved in the depositor's favour, not yet claimed
+    refunded_total: u256  # claimed; payout transfer emitted
+    forfeited_total: u256  # kept by the contract
 
     def __init__(self) -> None:
         self.owner = gl.message.sender_address
+
+    # ---------------------------------------------------------------- helpers
+
+    def _challenge_at(self, submission_id: str, index: int) -> Challenge:
+        n = _count(self.challenge_counts, submission_id)
+        if index == 0:
+            index = n
+        if n == 0 or index < 1 or index > n:
+            raise gl.vm.UserError("no challenge")
+        return self.challenges[_dispute_key(submission_id, index)]
+
+    def _appeal_at(self, submission_id: str, index: int) -> Appeal:
+        n = _count(self.appeal_counts, submission_id)
+        if index == 0:
+            index = n
+        if n == 0 or index < 1 or index > n:
+            raise gl.vm.UserError("no appeal")
+        return self.appeals[_dispute_key(submission_id, index)]
+
+    def _active_dispute(self, submission_id: str) -> str:
+        """"challenge" | "appeal" | "" -- the unresolved dispute, if any."""
+        n = _count(self.challenge_counts, submission_id)
+        if n and not self.challenges[_dispute_key(submission_id, n)].resolved:
+            return "challenge"
+        n = _count(self.appeal_counts, submission_id)
+        if n and not self.appeals[_dispute_key(submission_id, n)].adjudicated:
+            return "appeal"
+        return ""
+
+    def _pay(self, to: Address, amount: int) -> None:
+        """Every GEN movement is an EVM-style send emitted on finalization."""
+        if amount > 0:
+            _Recipient(to).emit_transfer(value=u256(amount), on="finalized")
+
+    def _refuse(self, reason: str, value: int) -> dict:
+        """Refuse a payable call without raising, returning the attached value."""
+        self._pay(gl.message.sender_address, value)
+        return {"ok": False, "reason": reason}
+
+    def _book_deposit(self, bond: int) -> None:
+        self.deposited_total = u256(int(self.deposited_total) + bond)
+        self.pending_bonds = u256(int(self.pending_bonds) + bond)
+
+    def _settle_bond(self, rec, favourable: bool) -> None:
+        """Move a pending bond to refund liability (favourable) or forfeit it.
+
+        Called exactly once per dispute: callers gate it behind the
+        resolved/adjudicated flag, and the zero-state check below makes a
+        second settlement impossible even if a gate were ever missed."""
+        bond = int(rec.bond_wei)
+        if int(rec.refund_due) or int(rec.refund_claimed) or int(rec.forfeited):
+            raise gl.vm.UserError("bond already settled")
+        self.pending_bonds = u256(int(self.pending_bonds) - bond)
+        if favourable:
+            rec.refund_due = u256(bond)
+            self.refund_liability = u256(int(self.refund_liability) + bond)
+        else:
+            rec.forfeited = u256(bond)
+            self.forfeited_total = u256(int(self.forfeited_total) + bond)
 
     # ------------------------------------------------------------------ reads
 
@@ -349,12 +465,12 @@ class OracleBoard(gl.Contract):
         }
 
     @gl.public.view
-    def get_challenge(self, submission_id: str) -> dict:
-        if submission_id not in self.challenges:
-            raise gl.vm.UserError("no challenge")
-        c = self.challenges[submission_id]
+    def get_challenge(self, submission_id: str, index: u32 = u32(0)) -> dict:
+        """Challenge `index` (1-based) of a submission; 0 means the latest."""
+        c = self._challenge_at(submission_id, int(index))
         return {
             "submission_id": c.submission_id,
+            "index": int(c.index),
             "challenger": str(c.challenger),
             "kind": c.kind,
             "evidence_digest": c.evidence_digest,
@@ -362,23 +478,50 @@ class OracleBoard(gl.Contract):
             "bond_wei": int(c.bond_wei),
             "created_at": int(c.created_at),
             "resolved": bool(c.resolved),
-            "bond_refunded": bool(c.bond_refunded),
+            "refund_due": int(c.refund_due),
+            "refund_claimed": int(c.refund_claimed),
+            "forfeited": int(c.forfeited),
         }
 
     @gl.public.view
-    def get_appeal(self, submission_id: str) -> dict:
-        if submission_id not in self.appeals:
-            raise gl.vm.UserError("no appeal")
-        a = self.appeals[submission_id]
+    def get_appeal(self, submission_id: str, index: u32 = u32(0)) -> dict:
+        """Appeal `index` (1-based) of a submission; 0 means the latest."""
+        a = self._appeal_at(submission_id, int(index))
         return {
             "submission_id": a.submission_id,
+            "index": int(a.index),
             "appellant": str(a.appellant),
             "bond_wei": int(a.bond_wei),
             "rebuttal": a.rebuttal,
             "created_at": int(a.created_at),
             "adjudicated": bool(a.adjudicated),
             "overturned": bool(a.overturned),
-            "refunded": bool(a.refunded),
+            "refund_due": int(a.refund_due),
+            "refund_claimed": int(a.refund_claimed),
+            "forfeited": int(a.forfeited),
+        }
+
+    @gl.public.view
+    def get_dispute_state(self, submission_id: str) -> dict:
+        """Which dispute (if any) is currently unresolved, and how many exist."""
+        if submission_id not in self.submissions:
+            raise gl.vm.UserError("unknown submission")
+        return {
+            "active": self._active_dispute(submission_id),
+            "challenge_count": _count(self.challenge_counts, submission_id),
+            "appeal_count": _count(self.appeal_counts, submission_id),
+        }
+
+    @gl.public.view
+    def get_accounting(self) -> dict:
+        """Aggregate bond ledger; `balance` is the contract's native balance."""
+        return {
+            "deposited_total": int(self.deposited_total),
+            "pending_bonds": int(self.pending_bonds),
+            "refund_liability": int(self.refund_liability),
+            "refunded_total": int(self.refunded_total),
+            "forfeited_total": int(self.forfeited_total),
+            "balance": int(self.balance),
         }
 
     @gl.public.view
@@ -389,7 +532,7 @@ class OracleBoard(gl.Contract):
         out: list = []
         for sid in ids[start:end]:
             s = self.submissions[sid]
-            if sid in self.appeals and not self.appeals[sid].adjudicated:
+            if self._active_dispute(sid) == "appeal":
                 verdict_status = "appealed"
             elif sid in self.verdicts:
                 verdict_status = "resolved"
@@ -531,37 +674,51 @@ class OracleBoard(gl.Contract):
         self.verdicts[submission_id] = v
         s.status = "resolved"
 
-    @gl.public.write
+    @gl.public.write.payable
     def challenge(
         self,
         submission_id: str,
         kind: str,
         evidence_digest: str,
         reason: str,
-    ) -> None:
-        """Open a challenge that requires new evidence or a material factual error."""
+    ) -> dict:
+        """Open a challenge that requires new evidence or a material factual error.
+
+        Returns {"ok", "reason"}; refusals do not raise (see module docstring)."""
+        bond = int(gl.message.value)  # the value actually received
+        problem = ""
         if submission_id not in self.verdicts:
-            raise gl.vm.UserError("no verdict to challenge")
-        if kind not in ("new_evidence", "factual_error"):
-            raise gl.vm.UserError("challenge kind must be new_evidence or factual_error")
-        if kind == "new_evidence" and len(evidence_digest.strip()) < 32:
-            raise gl.vm.UserError("new_evidence challenge requires substantive evidence")
-        if kind == "factual_error" and len(reason.strip()) < 32:
-            raise gl.vm.UserError("factual_error challenge requires a substantive reason")
-        if len(evidence_digest) > MAX_EVIDENCE_CHARS:
-            raise gl.vm.UserError("evidence too long")
-        if len(reason) > 2_000:
-            raise gl.vm.UserError("reason too long")
+            problem = "no verdict to challenge"
+        elif kind not in ("new_evidence", "factual_error"):
+            problem = "challenge kind must be new_evidence or factual_error"
+        elif kind == "new_evidence" and len(evidence_digest.strip()) < 32:
+            problem = "new_evidence challenge requires substantive evidence"
+        elif kind == "factual_error" and len(reason.strip()) < 32:
+            problem = "factual_error challenge requires a substantive reason"
+        elif len(evidence_digest) > MAX_EVIDENCE_CHARS:
+            problem = "evidence too long"
+        elif len(reason) > 2_000:
+            problem = "reason too long"
+        else:
+            # One unresolved dispute per submission: a new challenge may neither
+            # overwrite an open challenge nor interleave with an open appeal.
+            active = self._active_dispute(submission_id)
+            if active == "challenge":
+                problem = "an unresolved challenge already exists for this submission"
+            elif active == "appeal":
+                problem = "an unresolved appeal exists for this submission"
+            elif bond < CHALLENGE_BOND_WEI:
+                problem = (
+                    f"challenge requires a bond of at least {CHALLENGE_BOND_WEI} wei "
+                    f"(0.001 GEN). Sent: {bond}"
+                )
+        if problem:
+            return self._refuse(problem, bond)
 
-        bond = int(gl.message.value)
-        if bond < CHALLENGE_BOND_WEI:
-            raise gl.vm.UserError(
-                f"challenge requires a bond of at least {CHALLENGE_BOND_WEI} wei "
-                f"(0.001 GEN). Sent: {bond}"
-            )
-
+        index = _count(self.challenge_counts, submission_id) + 1
         c = Challenge()
         c.submission_id = submission_id
+        c.index = u32(index)
         c.challenger = gl.message.sender_address
         c.kind = kind
         c.evidence_digest = evidence_digest
@@ -569,21 +726,26 @@ class OracleBoard(gl.Contract):
         c.bond_wei = u256(bond)
         c.created_at = u256(now())
         c.resolved = False
-        c.bond_refunded = False
+        c.refund_due = u256(0)
+        c.refund_claimed = u256(0)
+        c.forfeited = u256(0)
 
-        self.challenges[submission_id] = c
+        self.challenges[_dispute_key(submission_id, index)] = c
+        self.challenge_counts[submission_id] = u32(index)
+        self._book_deposit(bond)
 
         s = self.submissions[submission_id]
         s.status = "challenged"
+        return {"ok": True, "reason": ""}
 
     @gl.public.write
     def reevaluate(self, submission_id: str) -> None:
         """Re-run validators after a challenge, incorporating the challenge evidence."""
         if submission_id not in self.submissions:
             raise gl.vm.UserError("unknown submission")
-        if submission_id not in self.challenges:
+        if _count(self.challenge_counts, submission_id) == 0:
             raise gl.vm.UserError("no active challenge")
-        c = self.challenges[submission_id]
+        c = self._challenge_at(submission_id, 0)
         if c.resolved:
             raise gl.vm.UserError("challenge already resolved")
 
@@ -670,62 +832,72 @@ class OracleBoard(gl.Contract):
 
         self.verdicts[submission_id] = v
         c.resolved = True
-        if verdict_changed:
-            c.bond_refunded = True
-            # gl.message.send(c.challenger, c.bond_wei)  # not yet available on StudioNet
+        # A changed verdict entitles the challenger to a claimable refund; an
+        # upheld verdict forfeits the bond. No funds move here.
+        self._settle_bond(c, verdict_changed)
         s.status = "resolved"
 
-    @gl.public.write
+    @gl.public.write.payable
     def appeal(
         self,
         submission_id: str,
         rebuttal: str,
-    ) -> None:
-        """Original submitter posts a bond and rebuttal to trigger secondary review."""
+    ) -> dict:
+        """Original submitter posts a bond and rebuttal to trigger secondary review.
+
+        Returns {"ok", "reason"}; refusals do not raise (see module docstring)."""
+        bond = int(gl.message.value)  # the value actually received
+        problem = ""
         if submission_id not in self.submissions:
-            raise gl.vm.UserError("unknown submission")
-        if submission_id not in self.verdicts:
-            raise gl.vm.UserError("no verdict to appeal")
-        if submission_id in self.appeals:
-            raise gl.vm.UserError("appeal already filed")
-
-        s = self.submissions[submission_id]
-        if gl.message.sender_address != s.submitter:
-            raise gl.vm.UserError("only the original submitter can appeal")
-
-        if not rebuttal or len(rebuttal.strip()) < 64:
-            raise gl.vm.UserError("rebuttal must be at least 64 characters")
-        if len(rebuttal) > 4_000:
-            raise gl.vm.UserError("rebuttal too long (max 4000 chars)")
-
-        bond = int(gl.message.value)
-        if bond < APPEAL_BOND_WEI:
-            raise gl.vm.UserError(
+            problem = "unknown submission"
+        elif submission_id not in self.verdicts:
+            problem = "no verdict to appeal"
+        elif _count(self.appeal_counts, submission_id) > 0:
+            problem = "appeal already filed"
+        elif self._active_dispute(submission_id) == "challenge":
+            problem = "an unresolved challenge exists for this submission"
+        elif gl.message.sender_address != self.submissions[submission_id].submitter:
+            problem = "only the original submitter can appeal"
+        elif not rebuttal or len(rebuttal.strip()) < 64:
+            problem = "rebuttal must be at least 64 characters"
+        elif len(rebuttal) > 4_000:
+            problem = "rebuttal too long (max 4000 chars)"
+        elif bond < APPEAL_BOND_WEI:
+            problem = (
                 f"appeal requires a bond of at least {APPEAL_BOND_WEI} wei "
                 f"(0.001 GEN). Sent: {bond}"
             )
+        if problem:
+            return self._refuse(problem, bond)
 
+        s = self.submissions[submission_id]
         a = Appeal()
         a.submission_id = submission_id
+        a.index = u32(1)
         a.appellant = gl.message.sender_address
         a.bond_wei = u256(bond)
         a.rebuttal = rebuttal.strip()
         a.created_at = u256(now())
         a.adjudicated = False
         a.overturned = False
-        a.refunded = False
+        a.refund_due = u256(0)
+        a.refund_claimed = u256(0)
+        a.forfeited = u256(0)
 
-        self.appeals[submission_id] = a
+        self.appeals[_dispute_key(submission_id, 1)] = a
+        self.appeal_counts[submission_id] = u32(1)
+        self._book_deposit(bond)
         s.status = "appealed"
+        return {"ok": True, "reason": ""}
 
     @gl.public.write
     def adjudicate(self, submission_id: str) -> None:
         """Run a secondary review incorporating the appellant's rebuttal."""
         if submission_id not in self.submissions:
             raise gl.vm.UserError("unknown submission")
-        if submission_id not in self.appeals:
+        if _count(self.appeal_counts, submission_id) == 0:
             raise gl.vm.UserError("no appeal filed")
-        a = self.appeals[submission_id]
+        a = self._appeal_at(submission_id, 0)
         if a.adjudicated:
             raise gl.vm.UserError("appeal already adjudicated")
 
@@ -823,10 +995,38 @@ class OracleBoard(gl.Contract):
         self.verdicts[submission_id] = v
         a.adjudicated = True
         a.overturned = overturned
-
-        if overturned:
-            a.refunded = True
-            # Bond refund: send wei back to appellant
-            # gl.message.send(a.appellant, a.bond_wei)  # not yet available on StudioNet
+        # Overturned verdict -> claimable refund; upheld -> forfeited.
+        self._settle_bond(a, overturned)
 
         s.status = "resolved"
+
+    @gl.public.write
+    def claim_refund(self, kind: str, submission_id: str, index: u32 = u32(0)) -> None:
+        """Depositor withdraws a refund entitlement ("challenge" | "appeal").
+
+        The entitlement is zeroed and the ledger updated *before* the native
+        transfer is emitted, and any UserError rolls the whole call back, so a
+        refund can be claimed at most once and never exceeds the bond."""
+        if kind == "challenge":
+            rec = self._challenge_at(submission_id, int(index))
+            depositor = rec.challenger
+        elif kind == "appeal":
+            rec = self._appeal_at(submission_id, int(index))
+            depositor = rec.appellant
+        else:
+            raise gl.vm.UserError("kind must be challenge or appeal")
+
+        if gl.message.sender_address != depositor:
+            raise gl.vm.UserError("only the bond depositor can claim this refund")
+        amount = int(rec.refund_due)
+        if amount <= 0:
+            raise gl.vm.UserError("no refund available to claim")
+        if amount > int(self.refund_liability) or amount > int(self.balance):
+            raise gl.vm.UserError("contract cannot cover this refund")
+
+        rec.refund_due = u256(0)
+        rec.refund_claimed = u256(int(rec.refund_claimed) + amount)
+        self.refund_liability = u256(int(self.refund_liability) - amount)
+        self.refunded_total = u256(int(self.refunded_total) + amount)
+
+        self._pay(depositor, amount)

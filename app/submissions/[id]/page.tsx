@@ -22,14 +22,16 @@ import { EvidenceExplorer } from "@/components/domain/evidence-explorer";
 import { VerdictCard } from "@/components/domain/verdict-card";
 import { ConsensusTimeline } from "@/components/domain/consensus-timeline";
 import { useSubmissionBundle } from "@/lib/hooks/use-submissions";
-import { APPEAL_BOND_WEI, oracleBoard } from "@/lib/genlayer/oracleboard";
+import { oracleBoard } from "@/lib/genlayer/oracleboard";
+import { getAccount } from "@/lib/genlayer/client";
+import { bondLabel, canClaim, formatGen } from "@/lib/refund";
 import { useToast } from "@/components/ui/toast";
 import { formatTimestamp, shortAddress } from "@/lib/utils";
 
 export default function SubmissionPage() {
   const params = useParams<{ id: string }>();
   const id = params?.id ?? null;
-  const { submission, verdict, challenge, appeal, refresh, loading, error } = useSubmissionBundle(id);
+  const { submission, verdict, challenge, appeal, disputeState, refresh, loading, error } = useSubmissionBundle(id);
   const { push } = useToast();
   const [evaluating, setEvaluating] = useState(false);
   const [challengeKind, setChallengeKind] = useState<"new_evidence" | "factual_error">("new_evidence");
@@ -41,6 +43,8 @@ export default function SubmissionPage() {
   const [appealBusy, setAppealBusy] = useState(false);
   const [appealOpen, setAppealOpen] = useState(false);
   const [adjudicating, setAdjudicating] = useState(false);
+  const [claiming, setClaiming] = useState<"challenge" | "appeal" | null>(null);
+  const me = typeof window === "undefined" ? null : (getAccount().address as string);
   const [elapsed, setElapsed] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -176,6 +180,30 @@ export default function SubmissionPage() {
     }
   }
 
+  async function claimRefund(kind: "challenge" | "appeal", index: number) {
+    if (!id) return;
+    setClaiming(kind);
+    try {
+      await oracleBoard.claimRefund({ kind, submissionId: id, index });
+      push({
+        title: "Refund claim accepted",
+        tone: "success",
+        description:
+          "The contract recorded the claim and emitted the payout transfer; funds arrive when the transaction finalizes.",
+      });
+      await refresh();
+    } catch (err) {
+      push({
+        title: "Refund claim failed - nothing was paid",
+        tone: "error",
+        description: (err as Error).message,
+      });
+      await refresh();
+    } finally {
+      setClaiming(null);
+    }
+  }
+
   async function submitChallenge() {
     if (!id) return;
     setChallengeBusy(true);
@@ -228,6 +256,16 @@ export default function SubmissionPage() {
   const isAppealed =
     (appeal && !appeal.adjudicated) ||
     submission.status === "appealed";
+  // Mirrors the contract's one-unresolved-dispute rule; the contract enforces it regardless of this UI.
+  const activeDispute =
+    disputeState?.active ??
+    (isAppealed ? "appeal" : challenge && !challenge.resolved ? "challenge" : "");
+  const canOpenChallenge = !!verdict && activeDispute === "";
+  const canOpenAppeal =
+    !!verdict &&
+    (disputeState ? disputeState.appeal_count === 0 : !appeal) &&
+    activeDispute === "" &&
+    !isAppealed;
 
   return (
     <div className="flex flex-col gap-8">
@@ -297,7 +335,7 @@ export default function SubmissionPage() {
               )}
             </div>
           ) : null}
-          {verdict && !appeal && !isAppealed ? (
+          {canOpenAppeal ? (
             <Dialog open={appealOpen} onOpenChange={setAppealOpen}>
               <DialogTrigger asChild>
                 <Button variant="outline">
@@ -311,7 +349,9 @@ export default function SubmissionPage() {
                     Post a bond of 0.001 GEN and submit a rebuttal explaining why
                     the initial evaluation was incorrect. A secondary validator
                     panel will re-evaluate all evidence plus your rebuttal. If the
-                    verdict changes, your bond is refunded.
+                    verdict changes, the bond becomes refundable and you claim
+                    it back in a separate transaction; otherwise it is
+                    forfeited.
                   </DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-4">
@@ -328,7 +368,7 @@ export default function SubmissionPage() {
                     </div>
                   </div>
                   <div className="rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs text-muted-foreground">
-                    <strong>Bond:</strong> 0.001 GEN (refunded if verdict changes)
+                    <strong>Bond:</strong> 0.001 GEN (claimable if the verdict changes, forfeited otherwise)
                     <br />
                     <strong>Note:</strong> Only the original submitter can file an appeal.
                     On StudioNet, the bond is symbolic — transactions are gasless.
@@ -350,7 +390,7 @@ export default function SubmissionPage() {
               </DialogContent>
             </Dialog>
           ) : null}
-          {verdict ? (
+          {canOpenChallenge ? (
             <Dialog open={challengeOpen} onOpenChange={setChallengeOpen}>
               <DialogTrigger asChild>
                 <Button variant="outline">
@@ -363,8 +403,11 @@ export default function SubmissionPage() {
                   <DialogDescription>
                     Challenges must contribute new material evidence or identify a
                     factual error the validators missed. A bond of{" "}
-                    <strong>0.001 GEN</strong> is required — refunded if the
-                    reevaluation changes the risk or confidence verdict.
+                    <strong>0.001 GEN</strong> is required. If the
+                    reevaluation changes the risk or confidence verdict the bond
+                    becomes refundable and you claim it back in a separate
+                    transaction; otherwise it is forfeited. Only one dispute can
+                    be open per dossier at a time.
                   </DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-4">
@@ -486,7 +529,12 @@ export default function SubmissionPage() {
           {challenge ? (
             <Card>
               <CardHeader>
-                <CardTitle>Active challenge</CardTitle>
+                <CardTitle>
+                  {challenge.resolved ? "Latest challenge" : "Active challenge"}
+                  {disputeState && disputeState.challenge_count > 1
+                    ? ` (#${challenge.index} of ${disputeState.challenge_count})`
+                    : ""}
+                </CardTitle>
                 <CardDescription>
                   {challenge.kind === "new_evidence" ? "New evidence" : "Factual error"} raised by{" "}
                   <span className="font-mono">{shortAddress(challenge.challenger, 6, 4)}</span>
@@ -515,14 +563,32 @@ export default function SubmissionPage() {
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>Opened {formatTimestamp(challenge.created_at)}</span>
                   <div className="flex items-center gap-2">
-                    <span>{(challenge.bond_wei / 1e15).toFixed(3)} GEN bond</span>
-                    {challenge.bond_refunded ? (
-                      <Badge variant="success">bond refunded</Badge>
-                    ) : null}
+                    <span>{formatGen(challenge.bond_wei)} GEN bond</span>
                     <Badge variant={challenge.resolved ? "success" : "warning"}>
                       {challenge.resolved ? "resolved" : "open"}
                     </Badge>
                   </div>
+                </div>
+                <div className="rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs">
+                  <div>{bondLabel(challenge, challenge.resolved)}</div>
+                  <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                    Depositor {shortAddress(challenge.challenger, 6, 4)}
+                  </div>
+                  {canClaim(challenge, challenge.resolved, challenge.challenger, me) ? (
+                    <Button
+                      className="mt-2"
+                      variant="accent"
+                      onClick={() => claimRefund("challenge", challenge.index)}
+                      disabled={claiming !== null}
+                    >
+                      {claiming === "challenge" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      Claim {formatGen(challenge.refund_due)} GEN refund
+                    </Button>
+                  ) : challenge.refund_due > 0 ? (
+                    <div className="mt-1 text-muted-foreground">
+                      Only the depositor account can claim this refund.
+                    </div>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
@@ -551,7 +617,7 @@ export default function SubmissionPage() {
                   Filed by{" "}
                   <span className="font-mono">{shortAddress(appeal.appellant, 6, 4)}</span>
                   {" · Bond: "}
-                  {(appeal.bond_wei / 1e15).toFixed(3)} GEN
+                  {formatGen(appeal.bond_wei)} GEN
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-3 text-sm">
@@ -570,14 +636,32 @@ export default function SubmissionPage() {
                         <Badge variant={appeal.overturned ? "success" : "outline"}>
                           {appeal.overturned ? "overturned" : "upheld"}
                         </Badge>
-                        {appeal.refunded ? (
-                          <Badge variant="success">bond refunded</Badge>
-                        ) : null}
                       </>
                     ) : (
                       <Badge variant="warning">pending adjudication</Badge>
                     )}
                   </div>
+                </div>
+                <div className="rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs">
+                  <div>{bondLabel(appeal, appeal.adjudicated)}</div>
+                  <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                    Depositor {shortAddress(appeal.appellant, 6, 4)}
+                  </div>
+                  {canClaim(appeal, appeal.adjudicated, appeal.appellant, me) ? (
+                    <Button
+                      className="mt-2"
+                      variant="accent"
+                      onClick={() => claimRefund("appeal", appeal.index)}
+                      disabled={claiming !== null}
+                    >
+                      {claiming === "appeal" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      Claim {formatGen(appeal.refund_due)} GEN refund
+                    </Button>
+                  ) : appeal.refund_due > 0 ? (
+                    <div className="mt-1 text-muted-foreground">
+                      Only the depositor account can claim this refund.
+                    </div>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
@@ -591,7 +675,7 @@ export default function SubmissionPage() {
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
                 <div className="flex items-center justify-between">
-                  <span>Bond: 0.001 GEN (symbolic on StudioNet)</span>
+                  <span>Bond: 0.001 GEN held until adjudication</span>
                   <Badge variant="warning">pending adjudication</Badge>
                 </div>
                 <p className="mt-3 text-xs">

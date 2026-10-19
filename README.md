@@ -42,13 +42,16 @@ tests/direct/               ← glsim in-memory unit tests (36 tests, no network
 |---|---|---|
 | `submit` | write | Open a new dossier with evidence and HTTPS URLs |
 | `evaluate` | write | Run validators; store accepted consensus verdict |
-| `challenge` | write | Open a challenge (new evidence or factual error) |
+| `challenge` | write (payable) | Open a challenge (new evidence or factual error) |
 | `reevaluate` | write | Re-run validators incorporating challenge evidence |
-| `appeal` | write | Original submitter posts a bond + rebuttal for secondary review |
+| `appeal` | write (payable) | Original submitter posts a bond + rebuttal for secondary review |
 | `adjudicate` | write | Run appeal validators; overturn verdict if risk/confidence bucket changes |
 | `get_submission` | view | Fetch submission metadata |
 | `get_verdict` | view | Fetch stored consensus verdict |
-| `get_challenge` | view | Fetch active challenge |
+| `claim_refund` | write | Depositor withdraws a resolved-in-favour bond refund |
+| `get_challenge` | view | Fetch a challenge (latest by default) |
+| `get_dispute_state` | view | Active dispute type and challenge / appeal counts |
+| `get_accounting` | view | Bond ledger totals and contract balance |
 | `get_appeal` | view | Fetch appeal record |
 | `list_submissions` | view | Paginated list of all dossiers |
 
@@ -69,9 +72,16 @@ Validators agree on a bucketed numeric fingerprint — not on prose:
 
 Validators can write different summaries, different material-risk phrases, and different follow-up items — they only need to agree on the numbers.
 
-### Appeal bond
+### Bonds, refunds and disputes
 
-`APPEAL_BOND_WEI = 1_000_000_000_000_000` (0.001 GEN). Only the original submitter can appeal. If adjudication changes the risk or confidence bucket, the bond is refunded. On StudioNet the bond is symbolic — all transactions are gasless.
+`challenge` and `appeal` are **payable** writes (0.001 GEN minimum each). The bond recorded is the value the contract actually received (`gl.message.value`), attributed to the sending account.
+
+- **Resolution never moves funds.** If reevaluation / adjudication changes the risk or confidence bucket, the contract records a *claimable refund* (`refund_due`); otherwise the bond is *forfeited* and stays in the contract.
+- **Claiming:** the depositor calls `claim_refund(kind, submission_id, index)` (`kind` = `"challenge"` or `"appeal"`, `index` 0 = latest). The entitlement is zeroed, the ledger updated, and the contract emits an EVM-style native send (on finalization) of exactly that amount to the depositor. A second claim reverts.
+- **Refusals return value:** a raising payable transaction keeps its GEN on StudioNet, so `challenge` / `appeal` never raise; they return `{"ok": false, "reason": ...}` and send the attached value back on finalization.
+- **Audit:** `get_accounting()` returns `deposited_total = pending_bonds + refund_liability + refunded_total + forfeited_total` plus the contract `balance`.
+- **One unresolved dispute per submission:** a challenge cannot be opened while a challenge or appeal is unresolved, and an appeal cannot be filed while a challenge is unresolved. Each dispute is stored under its own `<submission>#<n>` key, so history is never overwritten. A submission can be appealed once; it can be challenged again after a challenge resolves.
+- On StudioNet the bond is test value; see `REPLY.md` for what has and has not been verified on a live network.
 
 ---
 

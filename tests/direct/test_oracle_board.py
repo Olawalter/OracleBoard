@@ -138,25 +138,27 @@ class TestEvaluate:
 class TestChallenge:
     def test_requires_verdict(self, board, ctx):
         _submit(board, ctx)
-        with ctx.expect_revert("no verdict to challenge"):
-            board.challenge("test-dossier-001", "new_evidence", "x" * 40, "reason")
+        r = board.challenge("test-dossier-001", "new_evidence", "x" * 40, "reason")
+        assert not r["ok"] and r["reason"] == "no verdict to challenge"
 
     def test_new_evidence_requires_substance(self, board, ctx):
         _submit(board, ctx)
         board.evaluate("test-dossier-001")
-        with ctx.expect_revert("new_evidence challenge requires substantive evidence"):
-            board.challenge("test-dossier-001", "new_evidence", "short", "reason")
+        r = board.challenge("test-dossier-001", "new_evidence", "short", "reason")
+        assert not r["ok"] and "requires substantive evidence" in r["reason"]
 
     def test_factual_error_requires_reason(self, board, ctx):
         _submit(board, ctx)
         board.evaluate("test-dossier-001")
-        with ctx.expect_revert("factual_error challenge requires a substantive reason"):
-            board.challenge("test-dossier-001", "factual_error", "evidence", "short")
+        r = board.challenge("test-dossier-001", "factual_error", "evidence", "short")
+        assert not r["ok"] and "requires a substantive reason" in r["reason"]
 
     def test_sets_status_challenged(self, board, ctx):
         _submit(board, ctx)
         board.evaluate("test-dossier-001")
+        ctx.value = BOND
         board.challenge("test-dossier-001", "new_evidence", "x" * 40, "reason text")
+        ctx.value = 0
         s = board.get_submission("test-dossier-001")
         assert s["status"] == "challenged"
         c = board.get_challenge("test-dossier-001")
@@ -176,7 +178,9 @@ class TestReevaluate:
     def test_resolves_challenge(self, board, ctx):
         _submit(board, ctx)
         board.evaluate("test-dossier-001")
+        ctx.value = BOND
         board.challenge("test-dossier-001", "new_evidence", "x" * 40, "reason text")
+        ctx.value = 0
         board.reevaluate("test-dossier-001")
         c = board.get_challenge("test-dossier-001")
         assert c["resolved"]
@@ -190,35 +194,35 @@ class TestAppeal:
     def test_requires_verdict(self, board, ctx):
         _submit(board, ctx)
         ctx.value = BOND
-        with ctx.expect_revert("no verdict to appeal"):
-            with ctx.prank(SUBMITTER):
-                board.appeal("test-dossier-001", "x" * 100)
+        with ctx.prank(SUBMITTER):
+            r = board.appeal("test-dossier-001", "x" * 100)
+        assert not r["ok"] and r["reason"] == "no verdict to appeal"
         ctx.value = 0
 
     def test_requires_submitter(self, board, ctx):
         _submit(board, ctx)
         board.evaluate("test-dossier-001")
         ctx.value = BOND
-        with ctx.expect_revert("only the original submitter can appeal"):
-            with ctx.prank(OTHER_USER):
-                board.appeal("test-dossier-001", "x" * 100)
+        with ctx.prank(OTHER_USER):
+            r = board.appeal("test-dossier-001", "x" * 100)
+        assert not r["ok"] and r["reason"] == "only the original submitter can appeal"
         ctx.value = 0
 
     def test_requires_bond(self, board, ctx):
         _submit(board, ctx)
         board.evaluate("test-dossier-001")
         ctx.value = 0
-        with ctx.expect_revert("appeal requires a bond"):
-            with ctx.prank(SUBMITTER):
-                board.appeal("test-dossier-001", "x" * 100)
+        with ctx.prank(SUBMITTER):
+            r = board.appeal("test-dossier-001", "x" * 100)
+        assert not r["ok"] and "appeal requires a bond" in r["reason"]
 
     def test_requires_min_rebuttal(self, board, ctx):
         _submit(board, ctx)
         board.evaluate("test-dossier-001")
         ctx.value = BOND
-        with ctx.expect_revert("rebuttal must be at least 64 characters"):
-            with ctx.prank(SUBMITTER):
-                board.appeal("test-dossier-001", "too short")
+        with ctx.prank(SUBMITTER):
+            r = board.appeal("test-dossier-001", "too short")
+        assert not r["ok"] and r["reason"] == "rebuttal must be at least 64 characters"
         ctx.value = 0
 
     def test_sets_status_appealed(self, board, ctx):
@@ -241,9 +245,9 @@ class TestAppeal:
         ctx.value = BOND
         with ctx.prank(SUBMITTER):
             board.appeal("test-dossier-001", "x" * 100)
-        with ctx.expect_revert("appeal already filed"):
-            with ctx.prank(SUBMITTER):
-                board.appeal("test-dossier-001", "y" * 100)
+        with ctx.prank(SUBMITTER):
+            r = board.appeal("test-dossier-001", "y" * 100)
+        assert not r["ok"] and r["reason"] == "appeal already filed"
         ctx.value = 0
 
     def test_shows_in_list(self, board, ctx):
