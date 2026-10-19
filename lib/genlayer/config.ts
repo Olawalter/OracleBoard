@@ -21,7 +21,14 @@ export function getChain(key: ChainKey) {
 
 export const CLIENT_CHAIN: ChainKey = resolveChainKey(process.env.NEXT_PUBLIC_GENLAYER_CHAIN);
 
-export const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_ORACLEBOARD_ADDRESS ?? "") as `0x${string}` | "";
+// Latest StudioNet deployment (bond/refund-capable contract). Used when
+// NEXT_PUBLIC_ORACLEBOARD_ADDRESS is unset so a fresh clone or hosted build
+// works out of the box; the env var always takes precedence. Other chains have
+// no default and must set the env var.
+export const DEFAULT_STUDIONET_ADDRESS = "0x13e97ade9CAE0C1f8BA875dBE2edB28cFa5EBe2D" as const;
+
+export const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_ORACLEBOARD_ADDRESS ||
+  (CLIENT_CHAIN === "studionet" ? DEFAULT_STUDIONET_ADDRESS : "")) as `0x${string}` | "";
 
 export function requireContractAddress(): `0x${string}` {
   if (!CONTRACT_ADDRESS) {
