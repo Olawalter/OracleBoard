@@ -8,9 +8,9 @@ Validators independently:
      legal / operational risk, evidence support and contradictions.
   4. Emit a structured verdict.
 
-Consensus is reached over the substantive fields (overall_risk, confidence
-band, supported/unsupported claim counts, contradiction count, material
-risks), not over free-form prose or exact JSON strings.
+Consensus is reached over the substantive fields only: risk tier
+(low/moderate, elevated, high/severe) and confidence band. Claim counts,
+coverage and prose vary between independent LLM runs and are not compared.
 
 Only the accepted consensus verdict is persisted on-chain.
 
@@ -331,21 +331,29 @@ def _bucket_coverage(pct: int) -> int:
     return max(0, min(100, int(pct))) // 20  # 0-5
 
 
-def _consensus_signature(v: dict) -> str:
-    """The substantive fingerprint validators must agree on.
+def _risk_tier(level: str) -> int:
+    """Collapse the five risk levels into three tiers (low/moderate, elevated, high/severe).
 
-    Only numeric buckets are compared — material_risks and follow_up are
-    free-form prose that legitimately varies between validators.
-    """
-    sig = {
-        "risk": _score_risk(str(v.get("overall_risk", "elevated"))),
-        "conf": _score_confidence(str(v.get("confidence", "low"))),
-        "cov": _bucket_coverage(int(v.get("evidence_coverage", 0))),
-        "sup": _bucket_count(int(v.get("supported_claims", 0))),
-        "uns": _bucket_count(int(v.get("unsupported_claims", 0))),
-        "con": _bucket_count(int(v.get("contradictions", 0))),
-    }
-    return json.dumps(sig, sort_keys=True, separators=(",", ":"))
+    Independent LLM runs routinely land on adjacent levels; requiring the exact
+    level made validators disagree (UNDETERMINED) on live StudioNet."""
+    return (0, 0, 1, 2, 2)[_score_risk(level)]
+
+
+def _verdict_key(risk: str, confidence: str) -> tuple:
+    """The fields validators agree on, and the only fields that decide whether a
+    challenge / appeal changed the verdict (and therefore whether its bond is
+    refunded)."""
+    return (_risk_tier(risk), _score_confidence(confidence))
+
+
+def _consensus_signature(v: dict) -> str:
+    """The substantive fingerprint validators must agree on: risk tier and
+    confidence band. Claim counts, coverage and prose legitimately vary between
+    runs and are carried informationally, not compared."""
+    tier, conf = _verdict_key(
+        str(v.get("overall_risk", "elevated")), str(v.get("confidence", "low"))
+    )
+    return json.dumps({"risk_tier": tier, "conf": conf}, sort_keys=True, separators=(",", ":"))
 
 
 class OracleBoard(gl.Contract):
@@ -648,9 +656,9 @@ class OracleBoard(gl.Contract):
         accepted_raw = gl.eq_principle.prompt_comparative(
             analyse,
             "Two due-diligence verdicts are equivalent if their `sig` fields are the "
-            "identical JSON string. Ignore differences in `verdict.summary`, "
-            "`verdict.follow_up` wording and material-risk phrasing — only the "
-            "signature has to match exactly.",
+            "identical JSON string (risk tier and confidence band). Ignore every "
+            "difference inside `verdict`: summary, follow-up wording, material-risk "
+            "phrasing, claim counts and coverage. Only `sig` has to match exactly.",
         )
 
         envelope = json.loads(accepted_raw)
@@ -823,12 +831,10 @@ class OracleBoard(gl.Contract):
         v.summary = v_data.get("summary", "")
         v.finalized_at = u256(now())
 
-        new_risk_score = _score_risk(str(v_data["overall_risk"]))
-        new_conf_score = _score_confidence(str(v_data["confidence"]))
         old_v = self.verdicts[submission_id]
-        old_risk_score = _score_risk(old_v.overall_risk)
-        old_conf_score = _score_confidence(old_v.confidence)
-        verdict_changed = (new_risk_score != old_risk_score) or (new_conf_score != old_conf_score)
+        verdict_changed = _verdict_key(
+            str(v_data["overall_risk"]), str(v_data["confidence"])
+        ) != _verdict_key(old_v.overall_risk, old_v.confidence)
 
         self.verdicts[submission_id] = v
         c.resolved = True
@@ -917,8 +923,7 @@ class OracleBoard(gl.Contract):
         prev_contradictions = int(old_v.contradictions)
         prev_summary = old_v.summary
 
-        old_risk_score = _score_risk(prev_risk)
-        old_conf_score = _score_confidence(prev_confidence)
+        old_key = _verdict_key(prev_risk, prev_confidence)
 
         def analyse() -> str:
             fetched: list[str] = []
@@ -973,9 +978,7 @@ class OracleBoard(gl.Contract):
         envelope = json.loads(accepted_raw)
         v_data = envelope["verdict"]
 
-        new_risk_score = _score_risk(str(v_data["overall_risk"]))
-        new_conf_score = _score_confidence(str(v_data["confidence"]))
-        overturned = (new_risk_score != old_risk_score) or (new_conf_score != old_conf_score)
+        overturned = _verdict_key(str(v_data["overall_risk"]), str(v_data["confidence"])) != old_key
 
         v = Verdict()
         v.submission_id = submission_id

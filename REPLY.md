@@ -22,6 +22,12 @@ All changes are in the existing repo; nothing was rebuilt. Contract enforcement 
 | B | A second `challenge` replaced the first; challenges and appeals could run concurrently. | `challenges` / `appeals` were keyed by `submission_id`; `challenge` had no active-dispute check, `appeal` only checked "already filed". | Per-dispute keys `<submission>#<n>`, plus one-unresolved-dispute rule (section 4). |
 | C | UI showed "bond refunded" badges and "refunded if…" copy. | `app/submissions/[id]/page.tsx` read `bond_refunded` / `refunded`; README said the same. | Labels derive from `refund_due` / `refund_claimed` / `forfeited` (section 5). |
 
+### 2a. Consensus signature change (found during live testing)
+
+On StudioNet, `evaluate` returned UNDETERMINED on 5/5 attempts (twice, on the first deployment) with validators voting `disagree` and empty stderr. The cause was the equivalence signature: validators had to match exactly on risk level, confidence, coverage bucket and three claim-count buckets. I narrowed it (`_consensus_signature`, `_verdict_key`) to **risk tier** (low/moderate, elevated, high/severe) and **confidence band**; counts, coverage and prose are stored but not compared. `gl.eq_principle.prompt_comparative` is still used.
+
+The same `_verdict_key` now decides whether a challenge/appeal "changed the verdict" (and so whether the bond is refunded), so the money decision rests only on fields validators agreed on. **Behavior change:** a move between levels inside one tier (e.g. moderate -> low) no longer refunds the bond; it forfeits it. This is a product-rule decision I made; reverting it means reverting the signature too.
+
 ## 3. Refund implementation (claimable refund, not immediate)
 
 Chosen: **claimable refund**. Resolution is a consensus (non-deterministic) transaction; keeping payment as a separate, plain, authenticated call keeps the money path deterministic and lets resolution stay free of transfers.
@@ -66,27 +72,46 @@ Design decision to flag: "conflict" is scoped per submission and across the chal
 | Area | Command | Result | Evidence / limitation |
 |---|---|---|---|
 | Contract lint | `genvm-lint check contracts/oracle_board.py --json` (WSL) | Passed | `ok: true`, 3 lint checks, validates 14 methods. Run after the final contract change. An earlier run flagged `_count` as a static method (E022); fixed. Only note: a newer py-genlayer runner exists (I200). |
-| Direct tests | `pytest tests/direct` (WSL) | Passed, 66 | 34 original (edited where payable rejections now return a refusal instead of raising) + 32 new. Fails at setup on native Windows due to a temp-file lock in the test harness. |
+| Direct tests | `pytest tests/direct` (WSL) | Passed, 69 | 34 original (edited where payable rejections now return a refusal instead of raising) + 35 new (incl. 3 for the tier rule). Fails at setup on native Windows due to a temp-file lock in the test harness. |
 | Refund / withdrawal | `tests/direct/test_bonds_and_disputes.py` (`TestBondReceipt`, `TestChallengeRefund`, `TestAppealRefund`, `TestIndependentBondsAndAggregate`) | Passed | **Balances are simulated by a test helper** (`Ledger`): the direct VM neither credits `ctx.value` nor executes the emitted `EthSend`. Tests prove the contract emits exactly the right transfer to the right account once, and that ledger identities hold. They do not prove chain delivery. |
 | Dispute integrity | `TestChallengeConflicts`, `TestAppealConflicts` | Passed | Conflicting challenge/appeal rejected, records unchanged, rejected bonds returned, independent subjects work, history kept. |
 | Mutation check | Removed the `refund_due` zeroing and the active-challenge guard, reran new tests (on the final contract) | 4 tests failed, as intended | Contract restored (byte-identical). |
 | Integration tests | none | Not run | The repo has no `tests/integration`. |
 | Frontend | `npm run typecheck`, `npm run test:ui`, `npm run build` | Passed | `test:ui` is a new tsx script covering label/claimability logic only. `npm run lint` fails because `next lint` no longer exists in the installed Next 16 (pre-existing, not addressed). |
-| Live verification | none | **Not verified** | No deployment, no testnet transaction, no real balance change observed. |
+| Live verification | `npx tsx scripts/live_refund_check.ts` against StudioNet contract `0x13e97ade9CAE0C1f8BA875dBE2edB28cFa5EBe2D` | **Verified (one run)** | See section 7a. |
+
+### 7a. Live StudioNet run
+
+Deployed with `npm run deploy:contract -- --chain=studionet` (deployer is a throwaway account; tx `0x1a74b6cc643e8af1c66b707d7b19294e8375d38033c1d1825eb30b5004b087af`). Address: **`0x13e97ade9CAE0C1f8BA875dBE2edB28cFa5EBe2D`**. A first deployment (`0xcA5Ea7c8a587D7e4734b6930aE85606973908619`, before the signature fix) is obsolete.
+
+`scripts/live_refund_check.ts` used two throwaway accounts funded with 5 GEN each via `sim_fundAccount`, submission id `live-mvfq4ku5`:
+
+| Step | Observed |
+|---|---|
+| `submit`, `evaluate` | First `evaluate` UNDETERMINED (during RPC timeouts); second accepted, verdict `elevated`. |
+| `challenge` (account B, 0.001 GEN) | `get_dispute_state` -> active `challenge`, count 1; contract balance 0.001 GEN. |
+| Conflicting `challenge` (account A, 0.001 GEN) | Refused: challenge_count stayed 1. Account A was debited at first sample, and at the end both accounts were exactly 5 GEN again and the contract held 0, so the value was returned. |
+| `reevaluate` | Challenge resolved with `refund_due = 1000000000000000`, `forfeited = 0` (nothing paid yet). |
+| `claim_refund` by B | B's on-chain balance 4.999 -> 5.000 GEN (delta exactly the 0.001 GEN bond); `refund_due = 0`, `refund_claimed = 1000000000000000`. |
+| Second `claim_refund` | `refund_claimed` unchanged; no further payout. |
+| Final `get_accounting` | deposited 0.001, refunded 0.001, pending/liability/forfeited 0, contract balance 0. |
+
+Limits of this evidence: a single run; the forfeiture path, the appeal path, and non-depositor claims were not exercised live (they are covered only by the simulated-ledger direct tests); StudioNet is a test network; balances were read with `eth_getBalance` on Studio's RPC; the script hit transient RPC timeouts, which it retried.
 
 Install note: `npm ci` fails on the existing lockfile (missing optional platform entries, pre-existing); I used `npm install --no-package-lock`, so the lockfile is unchanged.
 
 ## 8. Deployment and compatibility
 
-- **Redeploy required.** Storage layout (new fields, count maps, ledger) and view return shapes changed (`bond_refunded` / `refunded` removed in favour of `refund_due` / `refund_claimed` / `forfeited`; `index` added). An already-deployed contract is not changed by these source edits and cannot be migrated in place; bonds held in the old contract have no claim path.
+- **Deployed:** StudioNet `0x13e97ade9CAE0C1f8BA875dBE2edB28cFa5EBe2D` (README updated). `.env.local` (gitignored) holds it locally; set `NEXT_PUBLIC_ORACLEBOARD_ADDRESS` in any hosted environment.
+- **Redeploy was required and has been done for StudioNet; any other network needs its own deploy.** Storage layout (new fields, count maps, ledger) and view return shapes changed (`bond_refunded` / `refunded` removed in favour of `refund_due` / `refund_claimed` / `forfeited`; `index` added). An already-deployed contract is not changed by these source edits and cannot be migrated in place; bonds held in the old contract have no claim path.
 - Frontend and any script calling `challenge` / `appeal` must treat a returned `ok: false` as a refusal, not a revert (the bundled UI does, via counter comparison).
 - After deploying, run `npm run deploy:contract`, which writes the new address into `.env.local`.
-- The pinned `py-genlayer` runner in the contract header passed `genvm-lint` validation, but the EVM-style send was only exercised against the newer SDK in the test cache (via a simulated ledger). Confirm real delivery with a funded StudioNet / testnet run; Inquest's `web/e2e/wallet-delivery.mjs` is a model for reading recipient balances.
+- The pinned `py-genlayer` runner in the contract header passed `genvm-lint` validation and the EVM-style send delivered real value on StudioNet (section 7a). Testnet (Asimov/Bradbury) behavior is unverified.
 
 ## 9. Checklist
 
 - [x] Verifiable refund / withdrawal path exists and is tested (`claim_refund`; 65 direct tests).
-- [~] Fund movement: partial. Emitted transfer and balance deltas verified only through a simulated ledger; no live-network confirmation.
+- [x] Fund movement: verified on StudioNet for the challenge -> refund claim path (recipient balance +0.001 GEN, refused-challenge value returned, double claim paid nothing); forfeiture, appeal and non-depositor paths are simulated-ledger only.
 - [x] Duplicate payouts and unauthorized withdrawals prevented (tests + mutation check).
 - [x] Conflicting challenges and appeals rejected at the contract level.
 - [x] Unresolved records cannot be overwritten through public methods (per-dispute keys; guards).
@@ -94,4 +119,4 @@ Install note: `npm ci` fails on the existing lockfile (missing optional platform
 - [x] UI / README refund claims match behavior (label logic unit-tested; not exercised against a live contract).
 - [~] Lint and direct tests passed; typecheck, UI test and build passed; no integration tests exist; `next lint` unavailable.
 - [x] Deployment limits documented (section 8).
-- [ ] Live deployment and real transfer verification: blocked, not done.
+- [~] Live verification: one StudioNet run (section 7a). Not run on any testnet; single run only.

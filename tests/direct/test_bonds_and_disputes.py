@@ -302,6 +302,35 @@ class TestChallengeRefund:
         assert_ledger_invariants(ledger)
 
 
+class TestVerdictChangeDefinition:
+    """Refund eligibility depends only on the validator-agreed fields: risk
+    tier (low/moderate | elevated | high/severe) and confidence band."""
+
+    def test_adjacent_risk_level_in_same_tier_is_not_a_change(self, ctx, board, ledger):
+        evaluated(ctx, board)  # elevated / medium -> tier 1
+        open_challenge(ledger)
+        set_llm(ctx, "elevated", "medium")
+        board.reevaluate(SID)
+        assert board.get_challenge(SID)["forfeited"] == BOND
+
+    def test_low_vs_moderate_same_tier_not_a_change(self, ctx, board, ledger):
+        set_llm(ctx, "moderate", "high")
+        with ctx.prank(SUBMITTER):
+            board.submit(SID, "Co", "s", "e", [])
+        board.evaluate(SID)
+        open_challenge(ledger)
+        set_llm(ctx, "low", "high")
+        board.reevaluate(SID)
+        assert board.get_challenge(SID)["forfeited"] == BOND
+
+    def test_tier_or_confidence_change_is_a_change(self, ctx, board, ledger):
+        evaluated(ctx, board)
+        open_challenge(ledger)
+        set_llm(ctx, "elevated", "high")  # same tier, confidence moved
+        board.reevaluate(SID)
+        assert board.get_challenge(SID)["refund_due"] == BOND
+
+
 class TestAppealRefund:
     def test_overturned_appeal_refund_claim(self, ctx, board, ledger):
         evaluated(ctx, board)

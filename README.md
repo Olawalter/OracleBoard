@@ -70,7 +70,7 @@ Validators agree on a bucketed numeric fingerprint — not on prose:
 }
 ```
 
-Validators can write different summaries, different material-risk phrases, and different follow-up items — they only need to agree on the numbers.
+Validators can write different summaries, different material-risk phrases, different claim counts and coverage figures — they only need to agree on the **risk tier** (low/moderate, elevated, high/severe) and the **confidence band**.
 
 ### Bonds, refunds and disputes
 
@@ -161,7 +161,7 @@ The `appeal` step requires a 0.001 GEN bond from the original submitter. `adjudi
 ## Live deployment
 
 - **Network:** StudioNet (chain ID 61999)
-- **Contract:** `0xBa82bF5411379bb38Fa44498382f02edDF4Aa2c3`
+- **Contract:** `0x13e97ade9CAE0C1f8BA875dBE2edB28cFa5EBe2D`
 - **Verified dossiers:** Aave v3, Compound Finance v3, MakerDAO/Sky (×2 via CLI E2E)
 
 ---

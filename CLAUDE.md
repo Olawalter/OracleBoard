@@ -7,8 +7,7 @@ GenLayer via `scripts/deploy.ts` (writes address into `.env.local`).
 ## Ground rules
 - **Never bypass consensus.** All verdicts must go through
   `gl.eq_principle.prompt_comparative` — no `strict_eq` on LLM outputs.
-- **Every write compares the bucketed signature, not the prose.** If you touch
-  `_consensus_signature` you must update both `evaluate` and `reevaluate`.
+- **Every write compares the signature (risk tier + confidence band), not the prose.** `_consensus_signature` and `_verdict_key` also decide bond refunds; if you touch them you must update `evaluate`, `reevaluate` and `adjudicate`.
 - **HTTPS-only, no private hosts.** Every URL passes through `_sanitize_url`.
 - **Frontend never trusts the client wallet with anything but its own submissions.** All read paths go through `oracleboard.ts`.
 
